@@ -15,12 +15,14 @@ import (
 	"runtime/debug"
 	"slices"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	cpb "go.opentelemetry.io/proto/otlp/common/v1"
 	mpb "go.opentelemetry.io/proto/otlp/metrics/v1"
-	// "google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/anatol/smart.go"
@@ -245,7 +247,7 @@ func recordNet(now uint64, ioCounters []netps.IOCountersStat) []*mpb.Metric {
 			dataI(now, int64(ioCounter.PacketsRecv), []string{"device", ioCounter.Name, "direction", "receive"}),
 			dataI(now, int64(ioCounter.PacketsSent), []string{"device", ioCounter.Name, "direction", "transmit"}),
 		)
-		dropMetric.GetSum().DataPoints = append(opsMetric.GetSum().DataPoints,
+		dropMetric.GetSum().DataPoints = append(dropMetric.GetSum().DataPoints,
 			dataI(now, int64(ioCounter.Dropin), []string{"device", ioCounter.Name, "direction", "receive"}),
 			dataI(now, int64(ioCounter.Dropout), []string{"device", ioCounter.Name, "direction", "transmit"}),
 		)
@@ -254,7 +256,8 @@ func recordNet(now uint64, ioCounters []netps.IOCountersStat) []*mpb.Metric {
 }
 
 // Base devices, not including partitions/namespaces/etc.
-var isDev = regexp.MustCompile("^(sd[a-z]+|nvme[0-9]+)$")
+// Actually use namespaces as targets because disk only grants access to namespaces and higher.
+var isDev = regexp.MustCompile("^(sd[a-z]+|nvme[0-9]+n[0-9]+)$")
 
 func recordSmart(now uint64) []*mpb.Metric {
 	smartMetric := &mpb.Metric{
@@ -295,6 +298,46 @@ func recordSmart(now uint64) []*mpb.Metric {
 	}
 
 	return []*mpb.Metric{smartMetric}
+}
+
+func recordPower(now uint64) []*mpb.Metric {
+	powerMetric := &mpb.Metric{
+		Name:        "system.powercap.energy",
+		Description: "Energy usage readings from the powercap subsystem",
+		Unit:        "uJ",
+		Data: &mpb.Metric_Sum{
+			Sum: &mpb.Sum{
+				DataPoints:             []*mpb.NumberDataPoint{},
+				AggregationTemporality: mpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
+				IsMonotonic:            true,
+			},
+		},
+	}
+	f, err := os.Open("/sys/class/powercap/")
+	if err != nil {
+		panic(err)
+	}
+	for names, err := f.Readdirnames(32); len(names) > 0 && err == nil; names, err = f.Readdirnames(32) {
+		for _, name := range names {
+			energy, err := os.ReadFile("/sys/class/powercap/" + name + "/energy_uj")
+			if err != nil {
+				continue
+			}
+			energyI, err := strconv.ParseInt(string(energy[:len(energy)-1]), 10, 64)
+			if err != nil {
+				panic(err)
+			}
+			label, err := os.ReadFile("/sys/class/powercap/" + name + "/name")
+			if err != nil {
+				panic(err)
+			}
+			powerMetric.GetSum().DataPoints = append(powerMetric.GetSum().DataPoints,
+				dataI(now, energyI, []string{"domain", name, "name", strings.TrimRight(string(label), "\n")}),
+			)
+		}
+	}
+
+	return []*mpb.Metric{powerMetric}
 }
 
 func recordMemory(now uint64, memInfo *mem.VirtualMemoryStat) []*mpb.Metric {
@@ -381,7 +424,7 @@ func main() {
 	debug.SetMemoryLimit(16 * 1024 * 1024)
 	runtime.GOMAXPROCS(2)
 	flag.Parse()
-	ctx, stop := signal.NotifyContext(context.Background(), os.Kill, os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Kill, syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
 	httpClient := &http.Client{}
@@ -442,14 +485,12 @@ L:
 			dus, _ := getUsages(ctx, dp)
 			ns, _ := netps.IOCountersWithContext(ctx, true) // per interface
 
-			/*
-				_ = s
-				_ = c
-				_ = m
-				_ = dio
-				_ = dus
-				_ = ns
-			*/
+			_ = s
+			_ = c
+			_ = m
+			_ = dio
+			_ = dus
+			_ = ns
 
 			now := uint64(t.UnixNano())
 			mt := []*mpb.Metric{}
@@ -459,8 +500,9 @@ L:
 			mt = append(mt, recordFS(now, dus)...)
 			mt = append(mt, recordNet(now, ns)...)
 			mt = append(mt, recordTemps(now, s)...)
-			// Add after root.
+			// These require CAP_SYS_ADMIN
 			mt = append(mt, recordSmart(now)...)
+			mt = append(mt, recordPower(now)...)
 
 			rm := &mpb.ResourceMetrics{
 				ScopeMetrics: []*mpb.ScopeMetrics{{
@@ -469,6 +511,7 @@ L:
 			}
 			_ = rm
 			SendMetrics(rm)
+			_ = prototext.Format
 			// fmt.Println(prototext.Format(rm))
 		}
 	}
