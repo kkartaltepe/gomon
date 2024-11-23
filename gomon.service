@@ -1,0 +1,17 @@
+[Unit]
+Description=Go monitoring tool
+After=network.target
+
+[Service]
+LockPersonality=true
+ProtectControlGroups=true
+NoNewPrivileges=true
+MemoryDenyWriteExecute=true
+
+ExecStart=/usr/bin/gomon
+KillMode=mixed
+Restart=on-failure
+Type=simple
+
+[Install]
+WantedBy=multi-user.target
