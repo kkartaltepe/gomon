@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"gomon/nvtop"
+
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	cpb "go.opentelemetry.io/proto/otlp/common/v1"
 	mpb "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -360,6 +362,81 @@ func recordMemory(now uint64, memInfo *mem.VirtualMemoryStat) []*mpb.Metric {
 	}}
 }
 
+func recordGPU(now uint64, gpus int32) []*mpb.Metric {
+	utilMetric := &mpb.Metric{
+		Name:        "system.gpu.usage",
+		Description: "Percentage utilization",
+		Data: &mpb.Metric_Gauge{
+			Gauge: &mpb.Gauge{
+				DataPoints: []*mpb.NumberDataPoint{},
+			},
+		},
+	}
+	freqMetric := &mpb.Metric{
+		Name:        "system.gpu.frequency",
+		Description: "Current frequency of gpu clocks",
+		Unit:        "MHz",
+		Data: &mpb.Metric_Gauge{
+			Gauge: &mpb.Gauge{
+				DataPoints: []*mpb.NumberDataPoint{},
+			},
+		},
+	}
+	memMetric := &mpb.Metric{
+		Name:        "system.gpu.memory.usage",
+		Description: "Amount of video memory used",
+		Unit:        "byte",
+		Data: &mpb.Metric_Gauge{
+			Gauge: &mpb.Gauge{
+				DataPoints: []*mpb.NumberDataPoint{},
+			},
+		},
+	}
+	pcieMetric := &mpb.Metric{
+		Name:        "system.gpu.pcie",
+		Description: "PCIe link width and link speed in GT/s",
+		Data: &mpb.Metric_Gauge{
+			Gauge: &mpb.Gauge{
+				DataPoints: []*mpb.NumberDataPoint{},
+			},
+		},
+	}
+	tempMetric := &mpb.Metric{
+		Name:        "system.gpu.temp",
+		Description: "GPU temperature sensor data",
+		Unit:        "C",
+		Data: &mpb.Metric_Gauge{
+			Gauge: &mpb.Gauge{
+				DataPoints: []*mpb.NumberDataPoint{},
+			},
+		},
+	}
+	gpuInfos := nvtop.Fill(gpus)
+	for _, info := range gpuInfos {
+		// TODO: Dont send metrics if there are no stats.
+		utilMetric.GetGauge().DataPoints = append(utilMetric.GetGauge().DataPoints,
+			dataI(now, int64(info.Gpu_util_rate), []string{"name", info.Name}),
+		)
+		freqMetric.GetGauge().DataPoints = append(freqMetric.GetGauge().DataPoints,
+			dataI(now, int64(info.Gpu_clock_speed), []string{"name", info.Name, "domain", "gfx"}),
+			dataI(now, int64(info.Mem_clock_speed), []string{"name", info.Name, "domain", "mem"}),
+		)
+		memMetric.GetGauge().DataPoints = append(memMetric.GetGauge().DataPoints,
+			dataI(now, int64(info.Total_memory), []string{"name", info.Name, "state", "total"}),
+			dataI(now, int64(info.Used_memory), []string{"name", info.Name, "state", "used"}),
+		)
+		pcieMetric.GetGauge().DataPoints = append(pcieMetric.GetGauge().DataPoints,
+			dataI(now, int64(info.Pcie_speed), []string{"name", info.Name, "domain", "speed"}),
+			dataI(now, int64(info.Pcie_width), []string{"name", info.Name, "domain", "width"}),
+		)
+		tempMetric.GetGauge().DataPoints = append(tempMetric.GetGauge().DataPoints,
+			dataI(now, int64(info.Gpu_temp), []string{"name", info.Name}),
+		)
+	}
+
+	return []*mpb.Metric{utilMetric, freqMetric, memMetric, pcieMetric, tempMetric}
+}
+
 func recordTemps(now uint64, temps []sensors.TemperatureStat) []*mpb.Metric {
 	tempMetric := &mpb.Metric{
 		Name:        "system.sensor.temp",
@@ -427,6 +504,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Kill, syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
+	gpus, err := nvtop.Init()
+	if err != nil {
+		panic(err)
+	}
+	defer nvtop.Deinit()
+	_ = gpus
+
 	httpClient := &http.Client{}
 	u := &url.URL{
 		Scheme: "http",
@@ -484,6 +568,7 @@ L:
 			dp, _ := disk.PartitionsWithContext(ctx, false) //  dont include virtual fs.
 			dus, _ := getUsages(ctx, dp)
 			ns, _ := netps.IOCountersWithContext(ctx, true) // per interface
+			nvtop.Fetch()
 
 			_ = s
 			_ = c
@@ -503,6 +588,7 @@ L:
 			// These require CAP_SYS_ADMIN
 			mt = append(mt, recordSmart(now)...)
 			mt = append(mt, recordPower(now)...)
+			mt = append(mt, recordGPU(now, gpus)...)
 
 			rm := &mpb.ResourceMetrics{
 				ScopeMetrics: []*mpb.ScopeMetrics{{
@@ -510,8 +596,8 @@ L:
 				}},
 			}
 			_ = rm
-			SendMetrics(rm)
 			_ = prototext.Format
+			SendMetrics(rm)
 			// fmt.Println(prototext.Format(rm))
 		}
 	}
