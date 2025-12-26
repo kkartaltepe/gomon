@@ -286,6 +286,7 @@ func recordSmart(now uint64) []*mpb.Metric {
 				panic(err)
 			}
 			defer dev.Close()
+
 			sm, err := dev.ReadGenericAttributes()
 			if err != nil {
 				panic(err)
@@ -325,9 +326,14 @@ func recordPower(now uint64) []*mpb.Metric {
 			if err != nil {
 				continue
 			}
-			energyI, err := strconv.ParseInt(string(energy[:len(energy)-1]), 10, 64)
+			energyS := string(energy[:len(energy)-1])
+			energyI, err := strconv.ParseInt(energyS, 10, 64)
 			if err != nil {
 				panic(err)
+			}
+			if energyI == 0 {
+				fmt.Println("invalid energy from powercap: %v", energyS)
+				continue
 			}
 			label, err := os.ReadFile("/sys/class/powercap/" + name + "/name")
 			if err != nil {
@@ -552,7 +558,6 @@ func main() {
 	_ = SendMetrics
 
 	ticker := time.NewTicker(*metricInterval)
-
 L:
 	for {
 		select {
