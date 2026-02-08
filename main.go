@@ -289,7 +289,8 @@ func recordSmart(now uint64) []*mpb.Metric {
 
 			sm, err := dev.ReadGenericAttributes()
 			if err != nil {
-				panic(err)
+				// PnP devices may hit os not supported.
+				continue
 			}
 			smartMetric.GetGauge().DataPoints = append(smartMetric.GetGauge().DataPoints,
 				dataI(now, int64(sm.Temperature), []string{"device", devPath, "name", "temp"}),
